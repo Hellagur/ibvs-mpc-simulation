@@ -1,2 +1,4 @@
-*.mat, *.asv
-/figs, figs/
+*.mat
+*.asv
+/figs
+figs/
