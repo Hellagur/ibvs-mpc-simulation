@@ -22,21 +22,21 @@ rng(2, "twister");  % Set random seed for reproducibility
 %% === Step 2: Iterative MPC simulation loop ===
 for k = 1:param.Tsteps
     tcon = tic;  % Start timer for computational time measurement
-    
+
     % ------------------------------------------------------------
-    % (1) Disturbance estimation
+    % (1) Estimate feature point depth
+    % Compute the current estimated depth of image feature points
+    % based on visual geometry and kinematic constraints.
+    % ------------------------------------------------------------
+    hist.zhat(:,k) = Est_depth(param, hist, k);
+
+    % ------------------------------------------------------------
+    % (2) Disturbance estimation
     % Update the mean and covariance of the external disturbance
     % using an exponential forgetting factor (online learning).
     % ------------------------------------------------------------
     [param.mud, param.Rd, param.gk] = Est_disturbance( ...
         hist.dT(:,k), param.mud, param.Rd, param.gk, param.lambda, k);
-    
-    % ------------------------------------------------------------
-    % (2) Estimate feature point depth
-    % Compute the current estimated depth of image feature points
-    % based on visual geometry and kinematic constraints.
-    % ------------------------------------------------------------
-    hist.zhat(:,k) = Est_depth(param, hist, k);
 
     % ------------------------------------------------------------
     % (3) Update system dynamics
