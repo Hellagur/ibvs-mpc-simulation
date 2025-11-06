@@ -21,6 +21,7 @@ rng(2, "twister");  % Set random seed for reproducibility
 
 %% === Step 2: Iterative MPC simulation loop ===
 for k = 1:param.Tsteps
+    textwaitbar(k,param.Tsteps,"MPC simulation is running");
     tcon = tic;  % Start timer for computational time measurement
     
     % ------------------------------------------------------------
