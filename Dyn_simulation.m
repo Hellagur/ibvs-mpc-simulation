@@ -97,11 +97,12 @@ function hist = Dyn_simulation(param, hist, k)
     %% --- Compute true disturbance ---
     xk1 = hist.xs(:,k+1);
     xk  = hist.xs(:,k);
-    dk  = xk1 - param.Ad*xk - param.Bd*hist.u(:,k) - param.Md;
-
-    hist.dT(:,k+1) = dk;           % true disturbance
-    hist.dP(:,k+1) = param.mud;    % predicted mean
-    hist.dE(:,k+1) = dk - param.mud; % estimation error
+    if isfield(param, 'Ad')
+        dk  = xk1 - param.Ad*xk - param.Bd*hist.u(:,k) - param.Md;
+        hist.dT(:,k+1) = dk;                % true disturbance
+        hist.dP(:,k+1) = param.mud;         % predicted mean
+        hist.dE(:,k+1) = dk - param.mud;    % estimation error
+    end
 end
 
 %% ------------------------------------------------------------------------

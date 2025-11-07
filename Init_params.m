@@ -1,4 +1,4 @@
-function [param, hist, mpc] = Init_params(s_ct0, r_tc0, w_ti0)
+function [param, hist, mpc, nmpc] = Init_params(s_ct0, r_tc0, w_ti0)
 %INIT_PARAMS  Initialize system, model, and MPC parameters for image-based
 % rendezvous and visual servo control simulation.
 %
@@ -17,6 +17,7 @@ function [param, hist, mpc] = Init_params(s_ct0, r_tc0, w_ti0)
 %   param  - Structure containing all physical, geometric, and model parameters.
 %   hist   - Structure for storing simulation histories and intermediate data.
 %   mpc    - Structure defining the MPC optimization problem and solver settings.
+%   nmpc   - Structure defining the NMPC optimization problem and solver settings.
 %
 % -------------------------------------------------------------------------
 
@@ -362,5 +363,125 @@ param.Ax_   = kron(eye(Np), param.Ax);
 param.bx_   = repmat(param.bx, Np, 1);
 param.Au_   = kron(eye(Np), param.Au);
 param.bu_   = repmat(param.bu, Np, 1);
+
+%% NMPC setup (use CasADi/IPOPT)
+import casadi.*;
+
+nmpc.Np     = 15;
+nmpc.Q      = diag(1e1*[zeros(12,1);ones(16,1);zeros(4,1)]);
+nmpc.R      = diag(1e0*ones( 6,1));
+nmpc.P      = diag(1e2*[zeros(12,1);ones(16,1);zeros(4,1)]);
+
+% States: [sigma_{CL}, omega_{CL}, rho_{L}, rhoDot_{L}, s, sDot, depth]
+nmpc.x      = SX.sym('x', 32, 1);
+nmpc.nx     = numel(nmpc.x);
+
+% Desired states
+nmpc.Xd     = [zeros(12,1); param.sd; zeros(12,1)];
+
+% Controls: [a^C tau^C]
+nmpc.u      = SX.sym('u', 6, 1);
+nmpc.nu     = numel(nmpc.u);
+
+% Decision variables
+nmpc.U      = SX.sym('U', nmpc.nu, nmpc.Np);
+
+% Initial guess control inputs
+nmpc.U0     = zeros(nmpc.Np*nmpc.nu,1);
+
+% A matrix that represents the states over the optimization problem
+nmpc.X      = SX.sym('X', nmpc.nx, nmpc.Np+1);
+
+% Parameters (which include initial and reference states)
+nmpc.X0     = SX.sym('X0', nmpc.nx*2, 1);
+
+% Construct nonlinear dynamics
+rhs         = Dyn_ibvs_n(nmpc, param);
+nmpc.f      = Function('f', {nmpc.x, nmpc.u}, {rhs});
+
+%Runge-Kutta 4
+k1 = @(f,x,u,dt) ( f(x,u) );
+k2 = @(f,x,u,dt) ( f(x + k1(f,x,u,dt)*dt/2,u) );
+k3 = @(f,x,u,dt) ( f(x + k2(f,x,u,dt)*dt/2,u) );
+k4 = @(f,x,u,dt) ( f(x + k1(f,x,u,dt)*dt,u) );
+fd = @(f,x,u,dt) ( x + (dt/6) * ( k1(f,x,u,dt) + 2*k2(f,x,u,dt) + 2*k3(f,x,u,dt) + k4(f,x,u,dt) ) );
+
+% Compute solution symbolically
+nmpc.X(:,1) = nmpc.X0(1:nmpc.nx);
+for k = 1:nmpc.Np
+    nmpc.X(:,k+1) = fd(nmpc.f, nmpc.X(:,k), nmpc.U(:,k), param.ts);
+end
+
+% This function to get the optimal trajectory knowing the optimal solution
+nmpc.F = Function('F', {nmpc.U,nmpc.X0}, {nmpc.X});
+
+% Compute objective
+nmpc.obj = 0;
+r = nmpc.X0(nmpc.nx+1:nmpc.nx*2,1);
+nmpc.obj = nmpc.obj + (nmpc.X(:,nmpc.Np+1) - r)'*nmpc.P*(nmpc.X(:,nmpc.Np+1) - r);
+for k = 1:nmpc.Np
+    nmpc.obj = nmpc.obj + (nmpc.X(:,k) - r)'*nmpc.Q*(nmpc.X(:,k) - r);
+    nmpc.obj = nmpc.obj + nmpc.U(:,k)'*nmpc.R*nmpc.U(:,k);
+end
+
+% Compute constraints 
+con = struct;
+con.g = []; % constraint vector
+for k = 1:nmpc.Np+1 % states: (s1, ..., s8)
+    con.g = [con.g; nmpc.X(13:20,k)];
+end
+
+Ng = 8 * (nmpc.Np + 1);  % total number of constraints
+
+% Preallocate
+con.lbg = zeros(Ng, 1);
+con.ubg = zeros(Ng, 1);
+
+% State constraints
+% For every (u_i, n_i) pair:
+for k = 0:(nmpc.Np)
+    idx_base = 8*k;  % base index for this time step
+    % odd indices → u1,u2,u3,u4
+    con.lbg(idx_base + [1 3 5 7]) = -param.um;
+    con.ubg(idx_base + [1 3 5 7]) =  param.um;
+    % even indices → n1,n2,n3,n4
+    con.lbg(idx_base + [2 4 6 8]) = -param.nm;
+    con.ubg(idx_base + [2 4 6 8]) =  param.nm;
+end
+
+% Input constraints
+for k = 0:nmpc.Np-1
+    idx = 6*k + (1:6);
+    con.lbx(idx(1:3),1) = - param.fm;
+    con.ubx(idx(1:3),1) =   param.fm;
+    con.lbx(idx(4:6),1) = - param.tm;
+    con.ubx(idx(4:6),1) =   param.tm;
+end
+
+nmpc.con = con;
+
+% Set IPOPT options
+opts = struct;
+opts.ipopt.max_iter                     = 100;
+opts.ipopt.print_level                  = 0;                % print level(0-12, 5 is verbose print)
+opts.ipopt.print_timing_statistics      = 'no';             % print time statistics
+opts.ipopt.print_user_options           = 'no';             % print user options
+opts.print_time                         = 0;                % print solve time
+opts.ipopt.output_file                  = 'log_ipopt.txt';  % output log file
+opts.ipopt.acceptable_tol               = 1e-8;
+opts.ipopt.acceptable_obj_change_tol    = 1e-6;
+
+% Set IPOPT solver
+n_dec       = nmpc.nu*nmpc.Np;
+opt_vars    = reshape(nmpc.U, n_dec, 1);
+nlp_prob    = struct('f', nmpc.obj, 'x', opt_vars, 'g', con.g, 'p', nmpc.X0);
+
+%% ---------- sanity checks (VERY IMPORTANT) ----------
+assert(length(con.lbg) == length(con.g), 'lbg length mismatch with g!');
+assert(length(con.ubg) == length(con.g), 'ubg length mismatch with g!');
+assert(length(con.lbx) == n_dec, 'lbx length mismatch with decision vars!');
+assert(length(con.ubx) == n_dec, 'ubx length mismatch with decision vars!');
+
+nmpc.solver = nlpsol('solver', 'ipopt', nlp_prob, opts);
 
 end
