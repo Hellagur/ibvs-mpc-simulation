@@ -48,7 +48,7 @@ for k = 1:param.Tsteps
     
     % Store optimal control input
     if ~ nmpc.solver.stats.success
-        if k < 1, error('NMPC infeasible at step 0.'); end
+        if k <= 1, error('NMPC infeasible at step 0.'); end
         warning('NMPC infeasible at step %d — using last feasible solution.', k);
         hist.u(:,k) = hist.u(:,k-1);
     else
